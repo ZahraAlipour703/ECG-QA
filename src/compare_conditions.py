@@ -94,3 +94,4 @@ def summarize_conditions(frame: pd.DataFrame) -> pd.DataFrame:
             "pooled_F1": pooled_f1,
             "mean_record_F1": float(group["F1"].mean()),
             "median_record_F1": float(group["F1"].median()),
+        })
