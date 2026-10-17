@@ -209,6 +209,15 @@ def main() -> None:
         except Exception:
             all_rows = []
 
+    # Remove any earlier results for the records selected in this invocation.
+    # If a selected record now fails to download, stale metrics from a prior run
+    # must not be silently included in the current summary.
+    selected_records = {str(x) for x in records}
+    all_rows = [
+        row for row in all_rows
+        if str(row.get("record")) not in selected_records
+    ]
+
     for record in records:
         print(f"\n========== RECORD {record} ==========")
         new_rows: list[dict[str, Any]] | None = None
@@ -238,8 +247,7 @@ def main() -> None:
     if all_rows:
         frame = pd.DataFrame(all_rows)
         # Restrict final output to selected records and known condition order.
-        selected = {str(x) for x in records}
-        frame = frame[frame["record"].astype(str).isin(selected)].copy()
+        frame = frame[frame["record"].astype(str).isin(selected_records)].copy()
         frame.to_csv(PER_RECORD_PATH, index=False)
         summary = summarize_conditions(frame)
         summary.to_csv(SUMMARY_PATH, index=False)
