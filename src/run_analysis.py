@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import wfdb
-from scipy.signal import butter, filtfilt, find_peaks
+from scipy.signal import butter, find_peaks, sosfiltfilt
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,35 +41,109 @@ def load_record(record_name: str, seconds: float | None):
     return signal, fs, ref_samples, ref_symbols
 
 
-def bandpass_ecg(x: np.ndarray, fs: float, low_hz: float = 5.0, high_hz: float = 20.0):
-    """Offline zero-phase Butterworth bandpass. Requires enough samples."""
+def bandpass_ecg(
+    x: np.ndarray,
+    fs: float,
+    low_hz: float = 5.0,
+    high_hz: float = 20.0,
+) -> np.ndarray:
+    """Apply an offline, zero-phase Butterworth bandpass filter."""
     nyquist = fs / 2.0
+
     if not (0 < low_hz < high_hz < nyquist):
-        raise ValueError(f"Invalid filter cutoffs for sampling rate {fs} Hz.")
-    sos = butter(3, [low_hz, high_hz], btype="bandpass", fs=fs, output="sos")
-    return filtfilt(sos, x)
+        raise ValueError(
+            f"Invalid filter cutoffs for sampling rate {fs} Hz."
+        )
+
+    sos = butter(
+        3,
+        [low_hz, high_hz],
+        btype="bandpass",
+        fs=fs,
+        output="sos",
+    )
+
+    return sosfiltfilt(sos, x)
 
 
-def detect_r_peaks(x: np.ndarray, fs: float):
+def detect_r_peaks(x: np.ndarray, fs: float) -> np.ndarray:
     """
-    Transparent baseline detector:
-    - use absolute filtered amplitude to tolerate inverted QRS complexes;
-    - minimum distance prevents detections clustered within one QRS;
-    - prominence is estimated from robust signal scale.
-    This is deliberately not a clinically validated detector.
+    QRS-oriented baseline detector using derivative energy.
+
+    This is an experimental signal-processing baseline,
+    not a clinically validated R-peak detector.
     """
+    x = np.asarray(x, dtype=float)
+
+    if x.ndim != 1 or len(x) < 3:
+        raise ValueError("ECG input must be a 1D signal with at least 3 samples.")
+
+    # Remove the median offset.
     centered = x - np.median(x)
-    robust_scale = 1.4826 * np.median(np.abs(centered - np.median(centered)))
+
+    # Emphasize rapid changes associated with QRS complexes.
+    derivative = np.diff(centered, prepend=centered[0]) * fs
+    energy = derivative ** 2
+
+    # Moving-window integration (approximately 120 ms).
+    window = max(1, int(round(0.12 * fs)))
+    integrated = np.convolve(
+        energy,
+        np.ones(window, dtype=float) / window,
+        mode="same",
+    )
+
+    # Robust adaptive threshold.
+    baseline = np.median(integrated)
+    mad = np.median(np.abs(integrated - baseline))
+    robust_scale = 1.4826 * mad
+
     if not np.isfinite(robust_scale) or robust_scale <= 0:
         return np.array([], dtype=int)
-    min_distance = max(1, int(0.25 * fs))
-    prominence = max(0.5 * robust_scale, np.finfo(float).eps)
-    peaks, _ = find_peaks(
-        np.abs(centered),
+
+    threshold = baseline + 4.0 * robust_scale
+
+    # Minimum candidate spacing: 280 ms.
+    min_distance = max(1, int(round(0.28 * fs)))
+
+    candidates, _ = find_peaks(
+        integrated,
+        height=threshold,
         distance=min_distance,
-        prominence=prominence,
     )
-    return peaks.astype(int)
+
+    # Map each energy candidate back to the strongest local ECG
+    # deflection in a window around it.
+    radius = max(1, int(round(0.08 * fs)))
+    mapped = []
+
+    for candidate in candidates:
+        left = max(0, candidate - radius)
+        right = min(len(centered), candidate + radius + 1)
+
+        local_peak = left + int(
+            np.argmax(np.abs(centered[left:right]))
+        )
+
+        mapped.append((local_peak, integrated[candidate]))
+
+    # Resolve mapped peaks that become too close after refinement.
+    min_separation = max(1, int(round(0.28 * fs)))
+    mapped.sort(key=lambda item: item[1], reverse=True)
+
+    selected = []
+
+    for sample, strength in mapped:
+        if all(
+            abs(sample - previous_sample) >= min_separation
+            for previous_sample, _ in selected
+        ):
+            selected.append((sample, strength))
+
+    return np.array(
+        sorted(sample for sample, _ in selected),
+        dtype=int,
+    )
 
 
 def match_peaks(reference: np.ndarray, detected: np.ndarray, fs: float, tolerance_ms: float):
@@ -160,8 +234,20 @@ def main():
     # MIT-BIH beat annotations include non-beat and rhythm-related symbols.
     # For this first baseline, exclude known non-beat annotations; document this
     # operational choice and refine it against the database documentation.
-    nonbeat_symbols = {"+", "~", "|", "!", "[", "]", "x", "(", ")", "p", "t", "u", "`", "'"}
-    beat_mask = np.array([symbol not in nonbeat_symbols for symbol in ref_symbols], dtype=bool)
+# Recognized MIT-BIH beat annotation symbols.
+# Rhythm, signal-quality, and waveform annotations are excluded.
+beat_symbols = {
+    "N", "L", "R", "B", "A", "a", "J", "S", "V",
+    "r", "F", "e", "j", "n", "E", "/", "f", "Q",
+    "?", "P",
+}
+
+beat_mask = np.array(
+    [symbol in beat_symbols for symbol in ref_symbols],
+    dtype=bool,
+)
+
+reference_beats = ref_samples[beat_mask]
     reference_beats = ref_samples[beat_mask]
 
     metrics = match_peaks(reference_beats, detected, fs, args.tolerance_ms)
@@ -170,7 +256,7 @@ def main():
         "sampling_rate_hz": fs,
         "analyzed_seconds": len(signal) / fs,
         "filter": "3rd-order Butterworth 5-20 Hz, zero-phase",
-        "annotation_policy": "excluded selected non-beat symbols; review before final study",
+        "annotation_policy": "included recognized beat symbols only",
     })
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
