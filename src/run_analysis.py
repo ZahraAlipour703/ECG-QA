@@ -236,18 +236,18 @@ def main():
     # operational choice and refine it against the database documentation.
 # Recognized MIT-BIH beat annotation symbols.
 # Rhythm, signal-quality, and waveform annotations are excluded.
-beat_symbols = {
-    "N", "L", "R", "B", "A", "a", "J", "S", "V",
-    "r", "F", "e", "j", "n", "E", "/", "f", "Q",
-    "?", "P",
-}
+    # Include recognized beat annotations only.
+    beat_symbols = {
+        "N", "L", "R", "B", "A", "a", "J", "S", "V",
+        "r", "F", "e", "j", "n", "E", "/", "f", "Q",
+        "?",
+    }
 
-beat_mask = np.array(
-    [symbol in beat_symbols for symbol in ref_symbols],
-    dtype=bool,
-)
+    beat_mask = np.array(
+        [symbol in beat_symbols for symbol in ref_symbols],
+        dtype=bool,
+    )
 
-reference_beats = ref_samples[beat_mask]
     reference_beats = ref_samples[beat_mask]
 
     metrics = match_peaks(reference_beats, detected, fs, args.tolerance_ms)
